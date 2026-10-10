@@ -5,8 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Check-in GREED</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#1a2e1c;--bg2:#213524;--gold:#F7CF45;--gold-l:#FFE070;--cream:#f5f0e8;--cream2:rgba(245,240,232,.88);--red:#d94f38;--green:#4caf7d;}
@@ -38,17 +36,7 @@ body{background:var(--bg);color:var(--cream);font-family:'Outfit',sans-serif;fon
 </style>
 </head>
 <body>
-<script>
-firebase.initializeApp({
-  apiKey:"AIzaSyBwAZb_A3IjPv7iL0cLhVnWO-Cuw_DD5g4",
-  authDomain:"club-greed.firebaseapp.com",
-  projectId:"club-greed",
-  storageBucket:"club-greed.firebasestorage.app",
-  messagingSenderId:"704669833762",
-  appId:"1:704669833762:web:917f4c7b104bc8ad39087b"
-});
-var db = firebase.firestore();
-</script>
+<!-- Nessun accesso diretto al database: i dati passano dall'area clienti sul server -->
 
 <div class="card" id="card">
   <!-- Stato iniziale: caricamento -->
@@ -115,138 +103,69 @@ function verificaCodice(code){
     +'<div id="errCheckin" style="display:none;margin-top:14px" class="err"></div>');
 }
 
-// ── CERCA CLIENTE E AGGIUNGI PUNTI ──
+// ── AREA CLIENTI SUL SERVER (controlla codice del giorno, cliente e un solo check-in al giorno) ──
+var AREA_CLIENTI_URL = 'https://europe-west3-club-greed.cloudfunctions.net/areaClienti';
+function areaClienti(dati){
+  return fetch(AREA_CLIENTI_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(dati) })
+    .then(function(r){ return r.json().catch(function(){ return {}; }).then(function(j){ j._status = r.status; return j; }); });
+}
+function esc(s){ return String(s||'').replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+// ── CHECK-IN ──
 function cercaClienteECheckin(){
   var cred = document.getElementById('credInput').value.trim();
   if(!cred){ mostraErrCheckin('Inserisci il tuo numero o email.'); return; }
-  var isEmail = cred.includes('@');
-  var campo = isEmail ? 'email' : 'telefono';
-  
-  document.querySelector('#card .btn').textContent = 'Verifica...';
-  document.querySelector('#card .btn').disabled = true;
+  var btn = document.querySelector('#card .btn');
+  btn.textContent = 'Verifica...'; btn.disabled = true;
 
-  // Normalizza telefono: prova con e senza +39
-  var varianti = [cred];
-  if(!isEmail){
-    if(cred.startsWith('+39')) varianti.push(cred.slice(3));
-    else if(cred.startsWith('0039')) varianti.push(cred.slice(4));
-    else { varianti.push('+39'+cred); varianti.push('0039'+cred); }
-  }
-
-  // Cerca con tutte le varianti
-  function cercaVarianti(lista, idx){
-    if(idx >= lista.length) return Promise.resolve({empty:true,docs:[]});
-    return db.collection('clienti').where(campo,'==',lista[idx]).limit(1).get()
-      .then(function(snap){ 
-        if(!snap.empty) return snap;
-        return cercaVarianti(lista, idx+1);
-      });
-  }
-
-  cercaVarianti(varianti, 0)
-    .then(function(snap){
-      if(snap.empty){
-        var campo2 = isEmail ? 'telefono' : 'email';
-        return db.collection('clienti').where(campo2,'==',cred).limit(1).get();
-      }
-      return snap;
-    })
-    .then(function(snap){
-      if(snap.empty){
-        mostraErrCheckin('Account non trovato. Sei iscritto al Club Greed?');
-        document.querySelector('#card .btn').textContent = 'Conferma check-in →';
-        document.querySelector('#card .btn').disabled = false;
-        return;
-      }
-      var docRef = snap.docs[0];
-      var dati = docRef.data();
-      verificaCheckinGiornaliero(docRef.id, dati);
-    }).catch(function(e){
-      mostraErrCheckin('Errore di rete. Riprova.');
-      console.error(e);
-    });
-}
-
-// ── VERIFICA CHE NON ABBIA GIÀ FATTO CHECK-IN OGGI ──
-function verificaCheckinGiornaliero(clienteId, dati){
-  var oggi = codiceOggi();
-  db.collection('checkins')
-    .where('clienteId','==',clienteId)
-    .where('codice','==',oggi)
-    .limit(1).get()
-    .then(function(snap){
-      if(!snap.empty){
-        // Ha già fatto check-in oggi
-        mostra('<span class="stato">ℹ️</span>'
-          +'<h2 class="titolo">Già <em>presente!</em></h2>'
-          +'<p class="msg">Hai già fatto il check-in oggi, '+dati.nome+'.<br>Ci vediamo domani per altri punti! 😊</p>'
-          +'<p class="punti-totali">I tuoi punti: <b>'+(dati.punti||0)+'</b></p>'
-          +'<a href="https://gelateriagreed.it/i-gusti/" class="btn">Ordina online →</a>');
-        return;
-      }
-      // Non ha ancora fatto check-in oggi: aggiungi punti
-      aggiungiPuntiCheckin(clienteId, dati, oggi);
-    });
-}
-
-// ── AGGIUNGI 5 PUNTI E REGISTRA CHECK-IN ──
-function aggiungiPuntiCheckin(clienteId, dati, codice){
-  var nuoviPunti = (dati.punti||0) + 5;
-  var batch = db.batch();
-  
-  // Aggiorna punti cliente
-  batch.update(db.collection('clienti').doc(clienteId), {punti: nuoviPunti});
-  
-  // Registra check-in
-  batch.set(db.collection('checkins').doc(), {
-    clienteId: clienteId,
-    nome: dati.nome + ' ' + (dati.cognome||''),
-    codice: codice,
-    puntiAssegnati: 5,
-    timestamp: firebase.firestore.FieldValue.serverTimestamp()
-  });
-  
-  batch.commit().then(function(){
+  areaClienti({ azione:'checkin', codice: codeParam, credenziale: cred }).then(function(j){
+    if(!j.ok){
+      if(j.codiceErrato){ verificaCodice(''); return; }
+      mostraErrCheckin(j.error || 'Errore di rete. Riprova.');
+      btn.textContent = 'Conferma check-in →'; btn.disabled = false;
+      return;
+    }
+    if(j.giaFatto){
+      mostra('<span class="stato">ℹ️</span>'
+        +'<h2 class="titolo">Già <em>presente!</em></h2>'
+        +'<p class="msg">Hai già fatto il check-in oggi, '+esc(j.nome)+'.<br>Ci vediamo domani per altri punti! 😊</p>'
+        +'<p class="punti-totali">I tuoi punti: <b>'+(j.punti||0)+'</b></p>'
+        +'<a href="https://gelateriagreed.it/i-gusti/" class="btn">Ordina online →</a>');
+      return;
+    }
     mostra('<span class="stato">🎉</span>'
-      +'<h2 class="titolo">Bentornato <em>'+dati.nome+'!</em></h2>'
+      +'<h2 class="titolo">Bentornato <em>'+esc(j.nome)+'!</em></h2>'
       +'<div class="punti-badge">+5 punti presenza</div>'
-      +'<p class="punti-totali">Punti totali: <b>'+nuoviPunti+'</b> · '
-      +livello(nuoviPunti)+'</p>'
+      +'<p class="punti-totali">Punti totali: <b>'+j.punti+'</b> · '+livello(j.punti)+'</p>'
       +'<p class="msg">Check-in registrato con successo.<br>Grazie per essere qui da GREED! 🍦</p>'
       +'<a href="https://gelateriagreed.it/i-gusti/" class="btn">Ordina online →</a>'
       +'<a href="https://gelateriagreed.it/" class="btn btn-ghost">Torna al sito</a>');
   }).catch(function(e){
-    mostra('<span class="stato">❌</span><h2 class="titolo">Errore</h2>'
-      +'<p class="msg">Non è stato possibile registrare il check-in.<br>Mostra questa schermata al personale.</p>');
+    mostraErrCheckin('Errore di rete. Riprova.');
+    btn.textContent = 'Conferma check-in →'; btn.disabled = false;
     console.error(e);
   });
 }
 
-// ── QR PERSONALE CLIENTE: mostra solo profilo + QR grande ──
+// ── QR PERSONALE CLIENTE: mostra solo nome, punti e QR grande ──
 function checkinDaQRPersonale(qr){
-  db.collection('clienti').where('qrCode','==',qr).limit(1).get()
-    .then(function(snap){
-      if(snap.empty){
-        mostra('<span class="stato">❌</span><h2 class="titolo">QR non <em>riconosciuto</em></h2>'
-          +'<p class="msg">Questo QR non corrisponde a nessun account.<br>Contatta il personale GREED.</p>');
-        return;
-      }
-      var dati = snap.docs[0].data();
-      var punti = dati.punti || 0;
-
-      // Genera QR grande con qrserver.com
-      var qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(qr);
-
-      mostra(
-        '<h2 class="titolo" style="margin-bottom:6px">Ciao, <em>'+dati.nome+'!</em></h2>'
-        +'<p style="font-size:12px;color:var(--cream2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:24px">Mostra questo QR al personale</p>'
-        +'<img src="'+qrUrl+'" style="width:220px;height:220px;border-radius:4px;border:3px solid var(--gold);margin-bottom:24px" alt="QR personale">'
-        +'<p class="punti-totali" style="margin-bottom:8px">Punti: <b>'+punti+'</b> · '+livello(punti)+'</p>'
-        +'<a href="https://gelateriagreed.it/" class="btn btn-ghost" style="margin-top:16px">Torna al sito</a>'
-      );
-    }).catch(function(e){
-      mostra('<span class="stato">❌</span><h2 class="titolo">Errore</h2><p class="msg">Errore di rete. Riprova.</p>');
-    });
+  areaClienti({ azione:'profiloQR', qr: qr }).then(function(j){
+    if(!j.ok){
+      mostra('<span class="stato">❌</span><h2 class="titolo">QR non <em>riconosciuto</em></h2>'
+        +'<p class="msg">Questo QR non corrisponde a nessun account.<br>Contatta il personale GREED.</p>');
+      return;
+    }
+    var qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(qr);
+    mostra(
+      '<h2 class="titolo" style="margin-bottom:6px">Ciao, <em>'+esc(j.nome)+'!</em></h2>'
+      +'<p style="font-size:12px;color:var(--cream2);letter-spacing:.08em;text-transform:uppercase;margin-bottom:24px">Mostra questo QR al personale</p>'
+      +'<img src="'+qrUrl+'" style="width:220px;height:220px;border-radius:4px;border:3px solid var(--gold);margin-bottom:24px" alt="QR personale">'
+      +'<p class="punti-totali" style="margin-bottom:8px">Punti: <b>'+(j.punti||0)+'</b> · '+livello(j.punti||0)+'</p>'
+      +'<a href="https://gelateriagreed.it/" class="btn btn-ghost" style="margin-top:16px">Torna al sito</a>'
+    );
+  }).catch(function(){
+    mostra('<span class="stato">❌</span><h2 class="titolo">Errore</h2><p class="msg">Errore di rete. Riprova.</p>');
+  });
 }
 
 function livello(p){
